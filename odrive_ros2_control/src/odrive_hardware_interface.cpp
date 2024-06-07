@@ -42,6 +42,7 @@ private:
     std::string can_intf_name_;
     SocketCanIntf can_intf_;
     rclcpp::Time timestamp_;
+    uint32_t active_errors_;
 };
 
 struct Axis {
@@ -62,7 +63,7 @@ struct Axis {
     // State (ODrives => ros2_control)
     // rclcpp::Time encoder_estimates_timestamp_;
     // uint32_t axis_error_ = 0;
-    // uint8_t axis_state_ = 0;
+    uint8_t axis_state_ = 0;
     // uint8_t procedure_result_ = 0;
     // uint8_t trajectory_done_flag_ = 0;
     double pos_estimate_ = NAN; // [rad]
@@ -71,7 +72,7 @@ struct Axis {
     // double iq_measured_ = NAN;
     double torque_target_ = NAN; // [Nm]
     double torque_estimate_ = NAN; // [Nm]
-    // uint32_t active_errors_ = 0;
+    uint32_t active_errors_ = 0;
     // uint32_t disarm_reason_ = 0;
     // double fet_temperature_ = NAN;
     // double motor_temperature_ = NAN;
@@ -86,15 +87,74 @@ struct Axis {
     bool pos_input_enabled_ = false;
     bool vel_input_enabled_ = false;
     bool torque_input_enabled_ = false;
+    rclcpp::Time last_feed{};
+    rclcpp::Time last_clear{};
+    rclcpp::Clock clk_{};
 
     template <typename T>
-    void send(const T& msg) {
+    bool send(const T& msg) {
         struct can_frame frame;
         frame.can_id = node_id_ << 5 | msg.cmd_id;
         frame.can_dlc = msg.msg_length;
         msg.encode_buf(frame.data);
+        bool res = can_intf_->send_can_frame(frame);
 
-        can_intf_->send_can_frame(frame);
+        if (res)
+        {
+            last_feed = clk_.now();
+        }
+        return res;
+    }
+
+    void feed()
+    {
+        rclcpp::Time now = clk_.now();
+        if ((now - last_feed).seconds() > 0.1)
+        {
+            Set_Axis_State_msg_t msg;
+            bool any_enabled = pos_input_enabled_ || vel_input_enabled_ || torque_input_enabled_;
+            msg.Axis_Requested_State = any_enabled ? AXIS_STATE_CLOSED_LOOP_CONTROL : AXIS_STATE_IDLE;
+            send(msg);
+        }
+    }
+
+    void clear_error()
+    {
+        // Set_Controller_Mode_msg_t msg;
+        // if (pos_input_enabled_) {
+        //     // RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting %d to position control", node_id_);
+        //     msg.Control_Mode = CONTROL_MODE_POSITION_CONTROL;
+        //     msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+        // } else if (vel_input_enabled_) {
+        //     // RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting %d to velocity control", node_id_);
+        //     msg.Control_Mode = CONTROL_MODE_VELOCITY_CONTROL;
+        //     msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+        // } else {
+        //     // RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting %d to torque control", node_id_);
+        //     msg.Control_Mode = CONTROL_MODE_TORQUE_CONTROL;
+        //     msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+        // }
+
+        // bool any_enabled = pos_input_enabled_ || vel_input_enabled_ || torque_input_enabled_;
+
+        // if (any_enabled) {
+        //     send(msg); // Set control mode
+        // }
+
+        auto now = clk_.now();
+        if ((now - last_clear).seconds() > 0.1)
+        {
+            // Set axis state
+            Clear_Errors_msg_t msg1;
+            msg1.Identify = 0;
+            send(msg1);
+            active_errors_ = 0;
+        }
+
+        // // Set axis state
+        // Set_Axis_State_msg_t msg2;
+        // msg2.Axis_Requested_State = any_enabled ? AXIS_STATE_CLOSED_LOOP_CONTROL : AXIS_STATE_IDLE;
+        // send(msg2);
     }
 };
 
@@ -129,6 +189,11 @@ CallbackReturn ODriveHardwareInterface::on_configure(const State&) {
 }
 
 CallbackReturn ODriveHardwareInterface::on_cleanup(const State&) {
+    for (auto& axis : axes_) {
+        Set_Axis_State_msg_t msg;
+        msg.Axis_Requested_State = AXIS_STATE_IDLE;
+        axis.send(msg);
+    }
     can_intf_.deinit();
     return CallbackReturn::SUCCESS;
 }
@@ -251,14 +316,14 @@ return_type ODriveHardwareInterface::perform_command_mode_switch(
 
             bool any_enabled = axis.pos_input_enabled_ || axis.vel_input_enabled_ || axis.torque_input_enabled_;
 
-            if (any_enabled) {
-                axis.send(msg); // Set control mode
-            }
-
             // Set axis state
             Clear_Errors_msg_t msg1;
             msg1.Identify = 0;
             axis.send(msg1);
+            if (any_enabled) {
+                axis.send(msg); // Set control mode
+            }
+
 
             // Set axis state
             Set_Axis_State_msg_t msg2;
@@ -281,6 +346,7 @@ return_type ODriveHardwareInterface::read(const rclcpp::Time& timestamp, const r
 }
 
 return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Duration&) {
+    static rclcpp::Clock clk{};
     for (auto& axis : axes_) {
         // Send the CAN message that fits the set of enabled setpoints
         if (axis.pos_input_enabled_) {
@@ -289,6 +355,7 @@ return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Du
             msg.Vel_FF = axis.vel_input_enabled_ ? (axis.vel_setpoint_  / (2 * M_PI)) : 0.0f;
             msg.Torque_FF = axis.torque_input_enabled_ ? axis.torque_setpoint_ : 0.0f;
             axis.send(msg);
+
         } else if (axis.vel_input_enabled_) {
             Set_Input_Vel_msg_t msg;
             msg.Input_Vel = axis.vel_setpoint_ / (2 * M_PI);
@@ -299,7 +366,39 @@ return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Du
             msg.Input_Torque = axis.torque_setpoint_;
             axis.send(msg);
         } else {
+            axis.feed();
             // no control enabled - don't send any setpoint
+        }
+        if (axis.active_errors_ != ODRIVE_ERROR_NONE) {
+            
+            if ((axis.active_errors_ & ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE) == ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE){
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 1000, "Axis %d, got ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE", axis.node_id_);
+                // return return_type::ERROR;
+            }
+            if ((axis.active_errors_ & ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE) == ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE){
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 1000, "Axis %d, got ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE", axis.node_id_);
+                // return return_type::ERROR;
+            }
+            if ((axis.active_errors_ & ODRIVE_ERROR_DC_BUS_OVER_CURRENT) == ODRIVE_ERROR_DC_BUS_OVER_CURRENT){
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 1000, "Axis %d, got ODRIVE_ERROR_DC_BUS_OVER_CURRENT", axis.node_id_);
+                // return return_type::ERROR;
+            }
+            if ((axis.active_errors_ & ODRIVE_ERROR_DC_BUS_OVER_REGEN_CURRENT) == ODRIVE_ERROR_DC_BUS_OVER_REGEN_CURRENT){
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 1000, "Axis %d, got ODRIVE_ERROR_DC_BUS_OVER_REGEN_CURRENT", axis.node_id_);
+                // return return_type::ERROR;
+            }
+            if ((axis.active_errors_ & ODRIVE_ERROR_WATCHDOG_TIMER_EXPIRED) == ODRIVE_ERROR_WATCHDOG_TIMER_EXPIRED){
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 1000, "Axis %d, got ODRIVE_ERROR_WATCHDOG_TIMER_EXPIRED", axis.node_id_);
+                axis.clear_error();
+            }
+            if ((axis.active_errors_ & ODRIVE_ERROR_ESTOP_REQUESTED) == ODRIVE_ERROR_ESTOP_REQUESTED){
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 1000, "Axis %d, got ODRIVE_ERROR_ESTOP_REQUESTED", axis.node_id_);
+                // // Set axis state
+                // Clear_Errors_msg_t msg1;
+                // msg1.Identify = 0;
+                // axis.send(msg1);
+                return return_type::ERROR;
+            }
         }
     }
 
@@ -339,6 +438,18 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
                 torque_estimate_ = msg.Torque_Estimate;
             }
         } break;
+        case Get_Error_msg_t::cmd_id: {
+            if (Get_Error_msg_t msg; try_decode(msg)) {
+                msg.Active_Errors;
+            }
+        } break;
+        case Heartbeat_msg_t::cmd_id: {
+            if (Heartbeat_msg_t msg; try_decode(msg)) {
+                active_errors_ = msg.Axis_Error;
+                axis_state_ = msg.Axis_State;
+            }
+        } break;
+        
             // silently ignore unimplemented command IDs
     }
 }

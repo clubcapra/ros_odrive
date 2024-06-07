@@ -188,7 +188,9 @@ void ODriveCanNode::request_state_callback() {
         write_le<uint32_t>(axis_state_, frame.data);
     }
     frame.can_dlc = 4;
-    can_intf_.send_can_frame(frame);
+    bool res = can_intf_.send_can_frame(frame);
+    if (!res) error("Failed to send request state callback");
+    
 }
 
 void ODriveCanNode::ctrl_msg_callback() {
@@ -203,7 +205,8 @@ void ODriveCanNode::ctrl_msg_callback() {
         control_mode = ctrl_msg_.control_mode;
     }
     frame.can_dlc = 8;
-    can_intf_.send_can_frame(frame);
+    bool res = can_intf_.send_can_frame(frame);
+    if (!res) error("Failed to send ctrl msg callback");
     
     frame = can_frame{};
     switch (control_mode) {
@@ -243,8 +246,35 @@ void ODriveCanNode::ctrl_msg_callback() {
             return;
     }
 
-    can_intf_.send_can_frame(frame);
+    res = can_intf_.send_can_frame(frame);
+    if (!res) error("Failed to send ctrl msg callback");
 }
+void ODriveCanNode::log(const char* msg) 
+{
+    static const char* last = nullptr;
+    static auto clk = get_clock();
+    if (msg == last)
+    {
+        RCLCPP_INFO(rclcpp::get_logger(get_name()), msg);
+        last = msg;
+        return;
+    }
+    RCLCPP_INFO_THROTTLE(rclcpp::get_logger(get_name()), *clk, 1000, msg);
+}
+
+void ODriveCanNode::error(const char* msg) 
+{
+    static const char* last = nullptr;
+    static auto clk = get_clock();
+    if (msg == last)
+    {
+        RCLCPP_ERROR(rclcpp::get_logger(get_name()), msg);
+        last = msg;
+        return;
+    }
+    RCLCPP_ERROR_THROTTLE(rclcpp::get_logger(get_name()), *clk, 1000, msg);
+}
+
 
 inline bool ODriveCanNode::verify_length(const std::string&name, uint8_t expected, uint8_t length) {
     bool valid = expected == length;
