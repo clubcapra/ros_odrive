@@ -54,15 +54,28 @@ struct Axis {
     SocketCanIntf* can_intf_;
     uint32_t node_id_;
 
+    rclcpp::Clock clock_ = {};
+    rclcpp::Time timeout_ = {};
+
+    void queue_clear_errors(rclcpp::Duration timeout = rclcpp::Duration::from_seconds(0))
+    {
+        if (queue_clear_errors_) return;
+        timeout_ = clock_.now() + timeout;
+        queue_clear_errors_ = true;
+    }
+
+    bool queue_clear_errors_ = false;
+
     // Commands (ros2_control => ODrives)
     double pos_setpoint_ = 0.0f; // [rad]
     double vel_setpoint_ = 0.0f; // [rad/s]
     double torque_setpoint_ = 0.0f; // [Nm]
+    double clear_errors_ = 0.0f;
 
     // State (ODrives => ros2_control)
     // rclcpp::Time encoder_estimates_timestamp_;
-    // uint32_t axis_error_ = 0;
-    // uint8_t axis_state_ = 0;
+    uint32_t axis_error_ = 0;
+    uint8_t axis_state_ = 0;
     // uint8_t procedure_result_ = 0;
     // uint8_t trajectory_done_flag_ = 0;
     double pos_estimate_ = NAN; // [rad]
@@ -71,12 +84,14 @@ struct Axis {
     // double iq_measured_ = NAN;
     double torque_target_ = NAN; // [Nm]
     double torque_estimate_ = NAN; // [Nm]
-    // uint32_t active_errors_ = 0;
-    // uint32_t disarm_reason_ = 0;
-    // double fet_temperature_ = NAN;
-    // double motor_temperature_ = NAN;
-    // double bus_voltage_ = NAN;
-    // double bus_current_ = NAN;
+    uint32_t active_errors_ = 0;
+    uint32_t disarm_reason_ = 0;
+    double fet_temperature_ = NAN;
+    double motor_temperature_ = NAN;
+    double bus_voltage_ = NAN;
+    double bus_current_ = NAN;
+    double error_ = 0.0f;
+    double state_ = 0.0f;
 
     // Indicates which controller inputs are enabled. This is configured by the
     // controller that sits on top of this hardware interface. Multiple inputs
@@ -86,6 +101,42 @@ struct Axis {
     bool pos_input_enabled_ = false;
     bool vel_input_enabled_ = false;
     bool torque_input_enabled_ = false;
+
+    void handle_queue()
+    {
+        if (queue_clear_errors_ && clock_.now() >= timeout_)
+        {
+            Set_Controller_Mode_msg_t msg;
+            if (pos_input_enabled_) {
+                RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting %d to position control", node_id_);
+                msg.Control_Mode = CONTROL_MODE_POSITION_CONTROL;
+                msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+            } else if (vel_input_enabled_) {
+                RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting %d to velocity control", node_id_);
+                msg.Control_Mode = CONTROL_MODE_VELOCITY_CONTROL;
+                msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+            } else {
+                RCLCPP_INFO(rclcpp::get_logger("ODriveHardwareInterface"), "Setting %d to torque control", node_id_);
+                msg.Control_Mode = CONTROL_MODE_TORQUE_CONTROL;
+                msg.Input_Mode = INPUT_MODE_PASSTHROUGH;
+            }
+
+            bool any_enabled = pos_input_enabled_ || vel_input_enabled_ || torque_input_enabled_;
+
+            if (any_enabled) {
+                send(msg); // Set control mode
+            }
+            // Set axis state
+            Clear_Errors_msg_t msg1;
+            msg1.Identify = 0;
+            send(msg1);
+
+            // Set axis state
+            Set_Axis_State_msg_t msg2;
+            msg2.Axis_Requested_State = any_enabled ? AXIS_STATE_CLOSED_LOOP_CONTROL : AXIS_STATE_IDLE;
+            send(msg2);
+        }
+    }
 
     template <typename T>
     void send(const T& msg) {
@@ -172,6 +223,26 @@ std::vector<hardware_interface::StateInterface> ODriveHardwareInterface::export_
             hardware_interface::HW_IF_POSITION,
             &axes_[i].pos_estimate_
         ));
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            info_.joints[i].name,
+            "voltage",
+            &axes_[i].bus_voltage_
+        ));
+        state_interfaces.emplace_back(hardware_interface::StateInterface(
+            info_.joints[i].name,
+            "current",
+            &axes_[i].bus_current_
+        ));
+        // state_interfaces.emplace_back(hardware_interface::StateInterface(
+        //     info_.joints[i].name,
+        //     "error",
+        //     &axes_[i].axis_error_
+        // ));
+        // state_interfaces.emplace_back(hardware_interface::StateInterface(
+        //     info_.joints[i].name,
+        //     "state",
+        //     &axes_[i].axis_state_
+        // ));
     }
 
     return state_interfaces;
@@ -271,10 +342,101 @@ return_type ODriveHardwareInterface::perform_command_mode_switch(
 }
 
 return_type ODriveHardwareInterface::read(const rclcpp::Time& timestamp, const rclcpp::Duration&) {
+    static rclcpp::Clock clk = rclcpp::Clock();
     timestamp_ = timestamp;
 
     while (can_intf_.read_nonblocking()) {
         // repeat until CAN interface has no more messages
+    }
+
+    for (auto& axis : axes_)
+    {
+        axis.error_ = (double)axis.axis_error_;
+        axis.state_ = (double)axis.axis_state_;
+        switch (axis.axis_error_)
+        {
+            case ODRIVE_ERROR_SYSTEM_LEVEL:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_SYSTEM_LEVEL for node_id: ", axis.node_id_);
+                axis.queue_clear_errors();
+                break;
+            case ODRIVE_ERROR_TIMING_ERROR:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_TIMING_ERROR for node_id: ", axis.node_id_);
+                axis.queue_clear_errors();
+                break;
+            case ODRIVE_ERROR_MISSING_ESTIMATE:
+                RCLCPP_FATAL_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_MISSING_ESTIMATE for node_id: ", axis.node_id_);
+                return return_type::ERROR;
+            case ODRIVE_ERROR_BAD_CONFIG:
+                RCLCPP_FATAL_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_BAD_CONFIG for node_id: ", axis.node_id_);
+                return return_type::ERROR;
+            case ODRIVE_ERROR_DRV_FAULT:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_DRV_FAULT for node_id: ", axis.node_id_);
+                axis.queue_clear_errors();
+                break;
+            case ODRIVE_ERROR_MISSING_INPUT:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_MISSING_INPUT for node_id: ", axis.node_id_);
+                axis.queue_clear_errors();
+                break;
+            case ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(5)));
+                break;
+            case ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE:
+                RCLCPP_FATAL_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE for node_id: ", axis.node_id_);
+                return return_type::ERROR;
+            case ODRIVE_ERROR_DC_BUS_OVER_CURRENT:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_DC_BUS_OVER_CURRENT for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(5)));
+                break;
+            case ODRIVE_ERROR_DC_BUS_OVER_REGEN_CURRENT:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_DC_BUS_OVER_REGEN_CURRENT for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(5)));
+                break;
+            case ODRIVE_ERROR_CURRENT_LIMIT_VIOLATION:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_CURRENT_LIMIT_VIOLATION for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(5)));
+                break;
+            case ODRIVE_ERROR_MOTOR_OVER_TEMP:
+                RCLCPP_FATAL_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_MOTOR_OVER_TEMP for node_id: ", axis.node_id_);
+                return return_type::ERROR;
+            case ODRIVE_ERROR_INVERTER_OVER_TEMP:
+                RCLCPP_FATAL_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_INVERTER_OVER_TEMP for node_id: ", axis.node_id_);
+                return return_type::ERROR;
+            case ODRIVE_ERROR_VELOCITY_LIMIT_VIOLATION:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_VELOCITY_LIMIT_VIOLATION for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(1)));
+                break;
+            case ODRIVE_ERROR_POSITION_LIMIT_VIOLATION:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_POSITION_LIMIT_VIOLATION for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(1)));
+                break;
+            case ODRIVE_ERROR_WATCHDOG_TIMER_EXPIRED:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_WATCHDOG_TIMER_EXPIRED for node_id: ", axis.node_id_);
+                axis.queue_clear_errors();
+                break;
+            case ODRIVE_ERROR_ESTOP_REQUESTED:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_ESTOP_REQUESTED for node_id: ", axis.node_id_);
+                // axis.queue_clear_errors();
+                break;
+            case ODRIVE_ERROR_SPINOUT_DETECTED:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_SPINOUT_DETECTED for node_id: ", axis.node_id_);
+                axis.queue_clear_errors(rclcpp::Duration(std::chrono::seconds(5)));
+                break;
+            case ODRIVE_ERROR_BRAKE_RESISTOR_DISARMED:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_BRAKE_RESISTOR_DISARMED for node_id: ", axis.node_id_);
+                break;
+            case ODRIVE_ERROR_THERMISTOR_DISCONNECTED:
+                RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_THERMISTOR_DISCONNECTED for node_id: ", axis.node_id_);
+                break;
+            case ODRIVE_ERROR_CALIBRATION_ERROR:
+                RCLCPP_FATAL_THROTTLE(rclcpp::get_logger("ODriveHardwareInterface"), clk, 2000, "ODRIVE_ERROR_CALIBRATION_ERROR for node_id: ", axis.node_id_);
+                return return_type::ERROR;
+            case ODRIVE_ERROR_NONE:
+            case ODRIVE_ERROR_INITIALIZING:
+                break;
+            default:
+                break;
+        }
     }
 
     return return_type::OK;
@@ -282,6 +444,15 @@ return_type ODriveHardwareInterface::read(const rclcpp::Time& timestamp, const r
 
 return_type ODriveHardwareInterface::write(const rclcpp::Time&, const rclcpp::Duration&) {
     for (auto& axis : axes_) {
+        
+        if (axis.clear_errors_ > 0.5f)
+        {
+            axis.clear_errors_ = 0.0f;
+            axis.queue_clear_errors();
+        }
+
+        axis.handle_queue();
+
         // Send the CAN message that fits the set of enabled setpoints
         if (axis.pos_input_enabled_) {
             Set_Input_Pos_msg_t msg;
@@ -339,7 +510,18 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
                 torque_estimate_ = msg.Torque_Estimate;
             }
         } break;
-            // silently ignore unimplemented command IDs
+        case Heartbeat_msg_t::cmd_id: {
+            if (Heartbeat_msg_t msg; try_decode(msg)) {
+                axis_error_ = msg.Axis_Error;
+                axis_state_ = msg.Axis_State;
+            }
+        } break;
+        case Get_Bus_Voltage_Current_msg_t::cmd_id: {
+            if (Get_Bus_Voltage_Current_msg_t msg; try_decode(msg)){
+                bus_voltage_ = msg.Bus_Voltage;
+                bus_current_ = msg.Bus_Current;
+            }
+        }
     }
 }
 
