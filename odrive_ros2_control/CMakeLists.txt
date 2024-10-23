@@ -5,13 +5,34 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+set(THIS_PACKAGE_INCLUDE_DEPENDS
+  control_msgs
+  control_toolbox
+  controller_interface
+  generate_parameter_library
+  hardware_interface
+  pluginlib
+  rclcpp
+  rclcpp_action
+  realtime_tools
+)
+
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(ament_cmake_auto REQUIRED)
+foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
+  find_package(${Dependency} REQUIRED)
+endforeach()
 ament_auto_find_build_dependencies()
 
 ament_export_dependencies(rosidl_default_runtime)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/ODriveJointState.msg"
+  "srv/RequestClearErrors.srv"
+  "srv/RequestReboot.srv"
+)
 
 include_directories(include)
 include_directories(../odrive_base/include)
@@ -21,6 +42,7 @@ ament_auto_add_library(
   ../odrive_base/src/epoll_event_loop.cpp
   ../odrive_base/src/socket_can.cpp
   src/odrive_hardware_interface.cpp
+  src/odrive_controller_interface.cpp
 )
 
 ament_target_dependencies(odrive_ros2_control_plugin

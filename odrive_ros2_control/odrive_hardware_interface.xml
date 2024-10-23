@@ -6,4 +6,11 @@
       ODrive plugin for ros2_control.
     </description>
   </class>
+  <class name="odrive_ros2_control_plugin/ODriveControllerInterface"
+         type="odrive_ros2_control::ODriveControllerInterface"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      ODrive plugin for ros2_control.
+    </description>
+  </class>
 </library>
