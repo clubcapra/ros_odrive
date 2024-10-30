@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>odrive_joint_broadcaster</name>
+  <version>0.0.0</version>
+  <description>ROS control controller interface to implement interactions with odrive_ros2_control</description>
+  <maintainer email="capra@ens.etsmtl.ca">capra</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <build_depend>generate_parameter_library</build_depend>
+
+  <depend>control_msgs</depend>
+  <depend>controller_interface</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>realtime_tools</depend>
+  <depend>std_srvs</depend>
+  
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <rosidl_package_name>${PROJECT_NAME}</rosidl_package_name>
+    <rosidl_target_interfaces>msg/${PROJECT_NAME}.msg</rosidl_target_interfaces>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

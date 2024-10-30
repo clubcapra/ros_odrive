@@ -1,3 +1,4 @@
+string prefix_name
 float32 bus_voltage
 float32 bus_current
 float32 fet_temperature
