@@ -43,22 +43,11 @@ static constexpr rmw_qos_profile_t rmw_qos_profile_services_hist_keep_all = {
   RMW_QOS_LIVELINESS_LEASE_DURATION_DEFAULT,
   false};
 
-using ControllerReferenceMsg = odrive_joint_broadcaster::ODriveJointBroadcaster::ControllerReferenceMsg;
-
-// called from RT control loop
-void reset_controller_reference_msg(
-  std::shared_ptr<ControllerReferenceMsg> & msg, const std::vector<std::string> & joint_names)
-{
-  msg->joint_names = joint_names;
-  msg->displacements.resize(joint_names.size(), std::numeric_limits<double>::quiet_NaN());
-  msg->velocities.resize(joint_names.size(), std::numeric_limits<double>::quiet_NaN());
-  msg->duration = std::numeric_limits<double>::quiet_NaN();
-}
-
 }  // namespace
 
 namespace odrive_joint_broadcaster
 {
+
 ODriveJointBroadcaster::ODriveJointBroadcaster() : controller_interface::ControllerInterface() {}
 
 controller_interface::CallbackReturn ODriveJointBroadcaster::on_init()
@@ -82,18 +71,9 @@ controller_interface::CallbackReturn ODriveJointBroadcaster::on_configure(
 {
   params_ = param_listener_->get_params();
 
-  if (!params_.joints)
+  if (!params_.joints.empty())
   {
     joints_ = params_.joints;
-  }
-
-  if (params_.joints.size() != state_joints_.size())
-  {
-    RCLCPP_FATAL(
-      get_node()->get_logger(),
-      "Size of 'joints' (%zu) and 'state_joints' (%zu) parameters has to be the same!",
-      params_.joints.size(), state_joints_.size());
-    return CallbackReturn::FAILURE;
   }
 
   // topics QoS
@@ -101,41 +81,12 @@ controller_interface::CallbackReturn ODriveJointBroadcaster::on_configure(
   subscribers_qos.keep_last(1);
   subscribers_qos.best_effort();
 
-  // Reference Subscriber
-  ref_subscriber_ = get_node()->create_subscription<ControllerReferenceMsg>(
-    "~/reference", subscribers_qos,
-    std::bind(&ODriveJointBroadcaster::reference_callback, this, std::placeholders::_1));
-
-  std::shared_ptr<ControllerReferenceMsg> msg = std::make_shared<ControllerReferenceMsg>();
-  reset_controller_reference_msg(msg, params_.joints);
-  input_ref_.writeFromNonRT(msg);
-
-  auto set_slow_mode_service_callback =
-    [&](
-      const std::shared_ptr<ControllerModeSrvType::Request> request,
-      std::shared_ptr<ControllerModeSrvType::Response> response)
-  {
-    if (request->data)
-    {
-      control_mode_.writeFromNonRT(control_mode_type::SLOW);
-    }
-    else
-    {
-      control_mode_.writeFromNonRT(control_mode_type::FAST);
-    }
-    response->success = true;
-  };
-
-  set_slow_control_mode_service_ = get_node()->create_service<ControllerModeSrvType>(
-    "~/set_slow_control_mode", set_slow_mode_service_callback,
-    rmw_qos_profile_services_hist_keep_all);
-
   try
   {
     // State publisher
-    s_publisher_ =
-      get_node()->create_publisher<ControllerStateMsg>("~/state", rclcpp::SystemDefaultsQoS());
-    state_publisher_ = std::make_unique<ControllerStatePublisher>(s_publisher_);
+    state_publisher_ =
+      get_node()->create_publisher<ControllerStateMsg>("~/odrive_state", rclcpp::SystemDefaultsQoS());
+    rt_state_publisher_ = std::make_unique<ControllerStatePublisher>(state_publisher_);
   }
   catch (const std::exception & e)
   {
@@ -145,28 +96,20 @@ controller_interface::CallbackReturn ODriveJointBroadcaster::on_configure(
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // TODO(anyone): Reserve memory in state publisher depending on the message type
-  state_publisher_->lock();
-  state_publisher_->msg_.header.frame_id = params_.joints[0];
-  state_publisher_->unlock();
+  // Reserve memory for the publisher
+  rt_state_publisher_->lock();
+  rt_state_publisher_->msg_.header.frame_id = params_.joints[0];
+  rt_state_publisher_->msg_.name.resize(joints_.size());
+  rt_state_publisher_->msg_.bus_voltage.resize(joints_.size());
+  rt_state_publisher_->msg_.bus_current.resize(joints_.size());
+  rt_state_publisher_->msg_.fet_temperature.resize(joints_.size());
+  rt_state_publisher_->msg_.motor_temperature.resize(joints_.size());
+  rt_state_publisher_->msg_.active_errors.resize(joints_.size());
+  rt_state_publisher_->msg_.disarm_reason.resize(joints_.size());
+  rt_state_publisher_->unlock();
 
   RCLCPP_INFO(get_node()->get_logger(), "configure successful");
   return controller_interface::CallbackReturn::SUCCESS;
-}
-
-void ODriveJointBroadcaster::reference_callback(const std::shared_ptr<ControllerReferenceMsg> msg)
-{
-  if (msg->joint_names.size() == params_.joints.size())
-  {
-    input_ref_.writeFromNonRT(msg);
-  }
-  else
-  {
-    RCLCPP_ERROR(
-      get_node()->get_logger(),
-      "Received %zu , but expected %zu joints in command. Ignoring message.",
-      msg->joint_names.size(), params_.joints.size());
-  }
 }
 
 controller_interface::InterfaceConfiguration ODriveJointBroadcaster::command_interface_configuration() const
@@ -174,14 +117,14 @@ controller_interface::InterfaceConfiguration ODriveJointBroadcaster::command_int
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
 
-  command_interfaces_config.names.reserve(params_.joints.size() * (int)joint_command_itfs::COUNT);
-  for (const auto & joint : params_.joints)
-  {
-    for (const auto& itf : JointCommandITFS)
-    {
-      ommand_interfaces_config.names.push_back(joint + "/" + itf);
-    }
-  }
+  // command_interfaces_config.names.reserve(params_.joints.size() * (int)joint_command_itfs::COUNT);
+  // for (const auto & joint : params_.joints)
+  // {
+  //   for (const auto& itf : JointCommandITFS)
+  //   {
+  //     command_interfaces_config.names.push_back(joint + "/" + itf);
+  //   }
+  // }
 
   return command_interfaces_config;
 }
@@ -191,7 +134,7 @@ controller_interface::InterfaceConfiguration ODriveJointBroadcaster::state_inter
   controller_interface::InterfaceConfiguration state_interfaces_config;
   state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
 
-  state_interfaces_config.names.reserve(state_joints_.size() * (int)joint_state_itfs::COUNT);
+  state_interfaces_config.names.reserve(joints_.size() * (int)joint_state_itfs::COUNT);
   for (const auto& joint : params_.joints)
   {
     for (const auto& itf : JointStateITFS)
@@ -210,9 +153,6 @@ controller_interface::CallbackReturn ODriveJointBroadcaster::on_activate(
   // `on_activate` method in `JointTrajectoryController` for exemplary use of
   // `controller_interface::get_ordered_interfaces` helper function
 
-  // Set default value in command
-  reset_controller_reference_msg(*(input_ref_.readFromRT)(), params_.joints);
-
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -221,39 +161,57 @@ controller_interface::CallbackReturn ODriveJointBroadcaster::on_deactivate(
 {
   // TODO(anyone): depending on number of interfaces, use definitions, e.g., `CMD_MY_ITFS`,
   // instead of a loop
-  for (size_t i = 0; i < command_interfaces_.size(); ++i)
-  {
-    command_interfaces_[i].set_value(std::numeric_limits<double>::quiet_NaN());
-  }
+  // for (size_t i = 0; i < command_interfaces_.size(); ++i)
+  // {
+  //   command_interfaces_[i].set_value(std::numeric_limits<double>::quiet_NaN());
+  // }
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::return_type ODriveJointBroadcaster::update(
   const rclcpp::Time & time, const rclcpp::Duration & /*period*/)
 {
-  auto current_ref = input_ref_.readFromRT();
 
-  // TODO(anyone): depending on number of interfaces, use definitions, e.g., `CMD_MY_ITFS`,
-  // instead of a loop
-  for (size_t i = 0; i < command_interfaces_.size(); ++i)
+  if (rt_state_publisher_ && rt_state_publisher_->trylock())
   {
-    if (!std::isnan((*current_ref)->displacements[i]))
+    rt_state_publisher_->msg_.header.stamp = time;
+
+    rt_state_publisher_->msg_.name.resize(joints_.size());
+
+    rt_state_publisher_->msg_.bus_voltage.resize(joints_.size());
+    rt_state_publisher_->msg_.bus_current.resize(joints_.size());
+    rt_state_publisher_->msg_.fet_temperature.resize(joints_.size());
+    rt_state_publisher_->msg_.motor_temperature.resize(joints_.size());
+    rt_state_publisher_->msg_.active_errors.resize(joints_.size());
+    rt_state_publisher_->msg_.disarm_reason.resize(joints_.size());
+    for (const auto& itf : state_interfaces_)
     {
-      if (*(control_mode_.readFromRT()) == control_mode_type::SLOW)
+      auto match = std::find(joints_.begin(), joints_.end(), itf.get_prefix_name());
+      if (match == joints_.end())
       {
-        (*current_ref)->displacements[i] /= 2;
+        joints_.emplace_back(itf.get_prefix_name());
+        rt_state_publisher_->msg_.name.emplace_back(itf.get_prefix_name());
+
+        rt_state_publisher_->msg_.bus_voltage.resize(joints_.size());
+        rt_state_publisher_->msg_.bus_current.resize(joints_.size());
+        rt_state_publisher_->msg_.fet_temperature.resize(joints_.size());
+        rt_state_publisher_->msg_.motor_temperature.resize(joints_.size());
+        rt_state_publisher_->msg_.active_errors.resize(joints_.size());
+        rt_state_publisher_->msg_.disarm_reason.resize(joints_.size());
       }
-      command_interfaces_[i].set_value((*current_ref)->displacements[i]);
+      auto index = joints_.begin() - match;
 
-      (*current_ref)->displacements[i] = std::numeric_limits<double>::quiet_NaN();
+
+      if (itf.get_interface_name() == "bus_voltage") rt_state_publisher_->msg_.bus_voltage[index] = (float)itf.get_value();
+      if (itf.get_interface_name() == "bus_current") rt_state_publisher_->msg_.bus_current[index] = (float)itf.get_value();
+      if (itf.get_interface_name() == "fet_temperature") rt_state_publisher_->msg_.fet_temperature[index] = (float)itf.get_value();
+      if (itf.get_interface_name() == "motor_temperature") rt_state_publisher_->msg_.motor_temperature[index] = (float)itf.get_value();
+      if (itf.get_interface_name() == "active_errors") rt_state_publisher_->msg_.active_errors[index] = (uint32_t)itf.get_value();
+      if (itf.get_interface_name() == "disarm_reason") rt_state_publisher_->msg_.disarm_reason[index] = (uint32_t)itf.get_value();
+      
     }
-  }
 
-  if (state_publisher_ && state_publisher_->trylock())
-  {
-    state_publisher_->msg_.header.stamp = time;
-    state_publisher_->msg_.set_point = command_interfaces_[CMD_MY_ITFS].get_value();
-    state_publisher_->unlockAndPublish();
+    rt_state_publisher_->unlockAndPublish();
   }
 
   return controller_interface::return_type::OK;

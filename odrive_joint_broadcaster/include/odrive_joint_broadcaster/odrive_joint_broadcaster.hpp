@@ -33,11 +33,12 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.h"
 #include "realtime_tools/realtime_publisher.h"
+#include "std_msgs/msg/empty.hpp"
 
 // Messages and services
-#include "odrive_joint_broadcaster/msg/o_drive_joint_state.hpp"
-#include "odrive_joint_broadcaster/srv/request_clear_errors.hpp"
-#include "odrive_joint_broadcaster/srv/request_reboot.hpp"
+#include "odrive_can/msg/o_drive_joint_state.hpp"
+#include "odrive_can/srv/request_clear_errors.hpp"
+#include "odrive_can/srv/request_reboot.hpp"
 
 namespace odrive_joint_broadcaster
 {
@@ -112,26 +113,21 @@ public:
   controller_interface::return_type update(
     const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
+  using ControllerStateMsg = odrive_can::msg::ODriveJointState;
+  using RequestClearErrorsSrv = odrive_can::srv::RequestClearErrors;
+  using RequestRebootSrv = odrive_can::srv::RequestReboot;
+
 protected:
   std::shared_ptr<odrive_joint_broadcaster::ParamListener> param_listener_;
   odrive_joint_broadcaster::Params params_;
 
   std::vector<std::string> joints_;
 
-  // Command subscribers and Controller State publisher
-
-  rclcpp::Service<RequestClearErrors>::SharedPtr request_clear_errors_service_;
-  realtime_tools::RealtimeBuffer<> control_mode_;
-
   using ControllerStatePublisher = realtime_tools::RealtimePublisher<ControllerStateMsg>;
 
-  rclcpp::Publisher<ControllerStateMsg>::SharedPtr s_publisher_;
-  std::unique_ptr<ControllerStatePublisher> state_publisher_;
+  rclcpp::Publisher<ControllerStateMsg>::SharedPtr state_publisher_;
+  std::unique_ptr<ControllerStatePublisher> rt_state_publisher_;
 
-private:
-  // callback for topic interface
-  ODRIVE_JOINT_BROADCASTER__VISIBILITY_LOCAL
-  void reference_callback(const std::shared_ptr<ControllerReferenceMsg> msg);
 };
 
 }  // namespace odrive_joint_broadcaster

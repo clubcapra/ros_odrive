@@ -15,7 +15,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_lifecycle
   realtime_tools
   std_srvs
-  # rosidl_default_generators
+  odrive_can
 )
 
 find_package(ament_cmake REQUIRED)
@@ -26,17 +26,13 @@ foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${Dependency} REQUIRED)
 endforeach()
 
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/ODriveJointState.msg"
-  "srv/RequestClearErrors.srv"
-  "srv/RequestReboot.srv"
-)
+
 ament_export_dependencies(rosidl_default_runtime)
 
 # Add odrive_joint_broadcaster library related compile commands
 generate_parameter_library(odrive_joint_broadcaster_parameters
-src/odrive_joint_broadcaster.yaml
-include/odrive_joint_broadcaster/validate_odrive_joint_broadcaster_parameters.hpp
+  src/odrive_joint_broadcaster.yaml
+  include/odrive_joint_broadcaster/validate_odrive_joint_broadcaster_parameters.hpp
 )
 
 include_directories(include)
@@ -45,11 +41,8 @@ add_library(
   odrive_joint_broadcaster_
   SHARED
   src/odrive_joint_broadcaster.cpp
-  )
+)
   
-rosidl_get_typesupport_target(cpp_typesupport_target
-  ${PROJECT_NAME} rosidl_typesupport_cpp)
-
 target_include_directories(odrive_joint_broadcaster_ PUBLIC
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/odrive_joint_broadcaster_parameters/include>"
   "$<INSTALL_INTERFACE:${PROJECT_NAME}_parameters/include>"
